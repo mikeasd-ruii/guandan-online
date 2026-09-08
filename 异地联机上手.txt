@@ -1,0 +1,63 @@
+掼蛋小馆：异地联机手把手教程（Render 方案）
+
+你最终要得到一个类似下面的地址：
+https://guandan-little-club-xxxx.onrender.com
+
+房主和朋友都打开这个地址。页面、房间服务、HTTPS 都由同一个地址提供，不要再打开本地 HTML。
+
+准备：
+1. 注册 GitHub：https://github.com/
+2. 注册 Render：https://render.com/
+3. 解压“掼蛋小馆联机包.zip”。
+
+第一步：把联机包放到 GitHub
+1. 登录 GitHub，点击右上角“+” → “New repository”。
+2. Repository name 填 guandan-online。
+3. 建议选择 Private；不要勾选 README、.gitignore 或 License。
+4. 点击“Create repository”。
+5. 在空仓库页面点“uploading an existing file”，把“联机包”文件夹里面的文件全部拖进去：
+   掼蛋小馆.html
+   server.mjs
+   Dockerfile
+   render.yaml
+   联机说明.txt
+   异地联机上手.txt
+6. 点“Commit changes”。
+
+第二步：在 Render 部署
+1. 登录 Render Dashboard，点击“New +” → “Web Service”。
+2. 连接 GitHub，授权 Render 访问刚才的 guandan-online 仓库，然后选中它。
+3. 设置：
+   Name：随意，例如 guandan-online
+   Language / Runtime：Docker
+   Branch：main
+   Root Directory：留空
+   Instance Type / Plan：Free（测试用）
+4. 如果页面提供 Health Check Path，填 /health。
+5. 不需要添加 API Key，也不需要数据库。PORT 通常由平台自动提供；render.yaml 已设置为 10000。
+6. 点击“Deploy Web Service”或“Create Web Service”。等日志出现“掼蛋小馆已启动”。
+7. 页面顶部会给出 https://xxx.onrender.com。打开它。如果看到掼蛋牌桌，部署成功。
+8. 想做一次硬检查，在地址后加 /health，例如：
+   https://xxx.onrender.com/health
+   正常会显示：{"ok":true,"game":"guandan"}
+
+第三步：四个人开玩
+1. 房主打开 Render 的 HTTPS 地址，点“好友联机”，填昵称，创建房间。
+2. 页面显示 8 位房间码。把“HTTPS 地址＋房间码”发给朋友。
+3. 朋友打开同一 HTTPS 地址，点“好友联机”，填昵称、房间码，点击加入。
+4. 开局前点空座位可以换座，正对面是队友。2～4个真人都能开，剩余座位由 AI 补齐。
+5. 房主点“开始比赛”。每副结束点“继续下一副”，会继续升级、进贡和还贡。
+
+免费档要知道的事：
+- 连续 15 分钟没有访问时，Render 免费服务会休眠；下次打开通常要等一会儿唤醒。
+- 服务休眠、重启或重新部署会清空正在进行的房间，因为本版房间保存在内存。
+- 正在打牌时页面每秒访问服务，一般不会因空闲而休眠。
+- 想长期稳定保留在线状态，可改用 Render 付费实例；当前程序仍应保持单实例运行。
+
+常见问题：
+- Deploy failed / No open ports：确认 Runtime 是 Docker，Root Directory 留空，Dockerfile 在仓库根目录。
+- 打开网址 502：查看 Logs，确认出现“掼蛋小馆已启动”，并检查 PORT 没被改成保留端口。
+- 朋友打不开：必须分享 https://...onrender.com，不能分享 localhost 或 192.168.x.x。
+- 网页能开但加入失败：所有人必须使用完全相同的 Render 地址；检查房间码，服务若刚重启需重新建房。
+- 更新游戏：替换 GitHub 仓库中的文件并提交，Render 会重新部署。重新部署会清空旧房间。
+

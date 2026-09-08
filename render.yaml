@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: guandan-little-club
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 10000
+
