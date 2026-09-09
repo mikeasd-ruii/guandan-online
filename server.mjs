@@ -533,6 +533,26 @@ function chooseMove(s, difficulty = "normal") {
 }
 
 // server/rooms.ts
+var EMOTES = [
+  "laugh",
+  "clap",
+  "cry",
+  "question",
+  "egg",
+  "flower",
+  "steady"
+];
+var VOICE_MAX_BYTES = 256 * 1024;
+var ROOM_VOICE_MAX_BYTES = 4 * 1024 * 1024;
+var EMOTE_TTL = 2 * 60 * 1e3;
+var VOICE_TTL = 5 * 60 * 1e3;
+var VOICE_MIMES = /* @__PURE__ */ new Set([
+  "audio/webm",
+  "audio/ogg",
+  "audio/mp4",
+  "audio/aac",
+  "audio/mpeg"
+]);
 var cleanName = (value) => {
   if (typeof value !== "string" || !value.trim())
     throw new Error("\u5148\u586B\u4E00\u4E2A\u6635\u79F0\u3002");
@@ -566,7 +586,13 @@ var RoomService = class {
         aReset: options.aReset !== false,
         difficulty: this.validDifficulty(options.difficulty ?? "hard")
       },
-      seenActions: /* @__PURE__ */ new Set()
+      seenActions: /* @__PURE__ */ new Set(),
+      humanMatch: false,
+      events: [],
+      voices: /* @__PURE__ */ new Map(),
+      voiceBytes: 0,
+      lastEmoteAt: [-Infinity, -Infinity, -Infinity, -Infinity],
+      lastVoiceAt: [-Infinity, -Infinity, -Infinity, -Infinity]
     };
     this.rooms.set(id, room);
     return { roomId: id, token, seat: 0 };
@@ -604,11 +630,13 @@ var RoomService = class {
     if (seat < 0) throw new Error("\u623F\u95F4\u5DF2\u7ECF\u5750\u6EE1 4 \u4EBA\u3002");
     const token = randomBytes(32).toString("hex");
     room.members[seat] = { name: cleanName(name), token, seen: this.clock() };
+    if (room.members.filter(Boolean).length >= 2) room.humanMatch = true;
     room.revision++;
     room.active = this.clock();
     return { roomId: room.id, token, seat };
   }
   snapshot(room, seat) {
+    this.pruneSocial(room);
     const now = this.clock();
     const online = room.members.map((m) => !!m && now - m.seen < 2e4);
     if (!online[room.owner]) {
@@ -632,7 +660,9 @@ var RoomService = class {
         autoplay: !m || now - m.seen >= 25e3
       })),
       match: room.match ? publicMatch(room.match, seat) : null,
-      options: room.options
+      options: room.options,
+      humanMatch: room.humanMatch,
+      events: room.events.map((event) => ({ ...event }))
     };
   }
   state(id, token) {
@@ -663,6 +693,7 @@ var RoomService = class {
     } else if (command.type === "restart") {
       owner();
       room.match = newMatch(randomInt(0, 4294967295), room.options);
+      room.humanMatch = room.members.filter(Boolean).length >= 2;
     } else if (command.type === "options") {
       owner();
       if (room.match) throw new Error("\u5F00\u5C40\u540E\u4E0D\u80FD\u4FEE\u6539\u623F\u95F4\u89C4\u5219\u3002");
@@ -681,6 +712,25 @@ var RoomService = class {
       room.revision++;
       room.seenActions.add(dedup);
       return this.snapshot(room, to);
+    } else if (command.type === "emote") {
+      if (!Number.isInteger(command.target) || command.target < 0 || command.target > 3)
+        throw new Error("\u8868\u60C5\u76EE\u6807\u65E0\u6548\u3002");
+      if (command.target === seat) throw new Error("\u4E0D\u80FD\u7ED9\u81EA\u5DF1\u53D1\u8868\u60C5\u3002");
+      if (!EMOTES.includes(command.value))
+        throw new Error("\u8868\u60C5\u65E0\u6548\u3002");
+      const now = this.clock();
+      if (now - room.lastEmoteAt[seat] < 3e3)
+        throw new Error("\u8868\u60C5\u53D1\u5F97\u592A\u5FEB\uFF0C\u8BF7\u7A0D\u7B49\u3002");
+      room.lastEmoteAt[seat] = now;
+      room.events.push({
+        id: randomUUID(),
+        kind: "emote",
+        from: seat,
+        target: command.target,
+        value: command.value,
+        createdAt: now
+      });
+      this.pruneSocial(room);
     } else {
       if (!room.match) throw new Error("\u8BF7\u5148\u5F00\u59CB\u5BF9\u5C40\u3002");
       if (!["play", "tribute", "return"].includes(command.type))
@@ -694,6 +744,82 @@ var RoomService = class {
       room.seenActions.delete(room.seenActions.values().next().value);
     return this.snapshot(room, seat);
   }
+  voiceUpload(id, token, audio, mime, durationMs) {
+    const { room, seat } = this.authenticate(id, token);
+    this.pruneSocial(room);
+    const normalizedMime = String(mime).split(";", 1)[0].trim().toLowerCase();
+    if (!VOICE_MIMES.has(normalizedMime)) throw new Error("\u8BED\u97F3\u683C\u5F0F\u4E0D\u652F\u6301\u3002");
+    if (!Buffer.isBuffer(audio) || audio.length < 1)
+      throw new Error("\u6CA1\u6709\u5F55\u5230\u8BED\u97F3\u3002");
+    if (audio.length > VOICE_MAX_BYTES) throw new Error("\u8BED\u97F3\u592A\u5927\uFF0C\u8BF7\u7F29\u77ED\u540E\u91CD\u8BD5\u3002");
+    if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > 10500)
+      throw new Error("\u8BED\u97F3\u6700\u957F 10 \u79D2\u3002");
+    const now = this.clock();
+    if (now - room.lastVoiceAt[seat] < 15e3)
+      throw new Error("\u8BED\u97F3\u53D1\u5F97\u592A\u5FEB\uFF0C\u8BF7\u7A0D\u7B49\u3002");
+    room.lastVoiceAt[seat] = now;
+    const event = {
+      id: randomUUID(),
+      kind: "voice",
+      from: seat,
+      target: -1,
+      value: "voice",
+      createdAt: now,
+      durationMs: Math.round(durationMs),
+      mime: normalizedMime
+    };
+    const stored = Buffer.from(audio);
+    room.events.push(event);
+    room.voices.set(event.id, {
+      audio: stored,
+      mime: normalizedMime,
+      createdAt: now
+    });
+    room.voiceBytes += stored.length;
+    this.pruneSocial(room);
+    room.revision++;
+    return this.snapshot(room, seat);
+  }
+  voiceRead(id, token, eventId) {
+    const { room } = this.authenticate(id, token);
+    this.pruneSocial(room);
+    const clip = room.voices.get(String(eventId));
+    if (!clip) throw new Error("\u8BED\u97F3\u5DF2\u8FC7\u671F\u3002");
+    return { mime: clip.mime, audio: Buffer.from(clip.audio) };
+  }
+  pruneSocial(room) {
+    const now = this.clock();
+    room.events = room.events.filter((event) => {
+      const ttl = event.kind === "voice" ? VOICE_TTL : EMOTE_TTL;
+      return now - event.createdAt <= ttl;
+    });
+    const liveVoiceIds = new Set(
+      room.events.filter((event) => event.kind === "voice").map((event) => event.id)
+    );
+    for (const [id, clip] of room.voices) {
+      if (!liveVoiceIds.has(id) || now - clip.createdAt > VOICE_TTL) {
+        room.voiceBytes -= clip.audio.length;
+        room.voices.delete(id);
+      }
+    }
+    while (room.voiceBytes > ROOM_VOICE_MAX_BYTES && room.voices.size) {
+      const oldest = room.voices.entries().next().value;
+      if (!oldest) break;
+      room.voiceBytes -= oldest[1].audio.length;
+      room.voices.delete(oldest[0]);
+      room.events = room.events.filter((event) => event.id !== oldest[0]);
+    }
+    if (room.events.length > 30) {
+      const removed = room.events.splice(0, room.events.length - 30);
+      for (const event of removed) {
+        const clip = room.voices.get(event.id);
+        if (clip) {
+          room.voiceBytes -= clip.audio.length;
+          room.voices.delete(event.id);
+        }
+      }
+    }
+  }
   leave(id, token) {
     const { room, seat } = this.authenticate(id, token);
     room.members[seat] = null;
@@ -704,6 +830,7 @@ var RoomService = class {
   tick() {
     const now = this.clock();
     for (const room of this.rooms.values()) {
+      this.pruneSocial(room);
       if (now - room.active > 15 * 60 * 1e3) {
         this.rooms.delete(room.id);
         continue;
@@ -744,7 +871,7 @@ function createGameServer({
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader(
       "Access-Control-Allow-Headers",
-      "Content-Type, Authorization"
+      "Content-Type, Authorization, X-Room-Id, X-Duration-Ms"
     );
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.setHeader("Cache-Control", "no-store");
@@ -766,7 +893,7 @@ function createGameServer({
         res.end('{"ok":true,"game":"guandan"}');
         return;
       }
-      if (req.method !== "POST" || req.url !== "/api") {
+      if (req.method !== "POST" || req.url !== "/api" && req.url !== "/voice") {
         res.writeHead(404);
         res.end("Not found");
         return;
@@ -779,25 +906,40 @@ function createGameServer({
         limits.set(ip, limit);
       }
       if (++limit.requests > 1e3) throw new Error("\u8BF7\u6C42\u592A\u9891\u7E41\uFF0C\u8BF7\u7A0D\u540E\u518D\u8BD5\u3002");
+      const token = String(req.headers.authorization ?? "").replace(
+        /^Bearer /,
+        ""
+      );
       const chunks = [];
       let bytes = 0;
       for await (const chunk of req) {
         const buffer = Buffer.from(chunk);
         bytes += buffer.length;
-        if (bytes > 12e3) {
+        const maxBytes = req.url === "/voice" ? VOICE_MAX_BYTES : 12e3;
+        if (bytes > maxBytes) {
           res.writeHead(413);
-          res.end('{"error":"\u8BF7\u6C42\u8FC7\u5927"}');
+          res.end(
+            req.url === "/voice" ? '{"error":"\u8BED\u97F3\u592A\u5927\uFF0C\u8BF7\u7F29\u77ED\u540E\u91CD\u8BD5\u3002"}' : '{"error":"\u8BF7\u6C42\u8FC7\u5927"}'
+          );
           return;
         }
         chunks.push(buffer);
       }
+      if (req.url === "/voice") {
+        const result2 = rooms.voiceUpload(
+          String(req.headers["x-room-id"] ?? ""),
+          token,
+          Buffer.concat(chunks),
+          String(req.headers["content-type"] ?? ""),
+          Number(req.headers["x-duration-ms"])
+        );
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        res.end(JSON.stringify(result2));
+        return;
+      }
       const data = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       if (!data || typeof data !== "object" || Array.isArray(data))
         throw new Error("\u8BF7\u6C42\u683C\u5F0F\u65E0\u6548\u3002");
-      const token = String(req.headers.authorization ?? "").replace(
-        /^Bearer /,
-        ""
-      );
       let result;
       if (data.op === "create") {
         if (++limit.creates > 12) throw new Error("\u5F00\u623F\u592A\u9891\u7E41\uFF0C\u8BF7\u7A0D\u540E\u518D\u8BD5\u3002");
@@ -814,7 +956,10 @@ function createGameServer({
           data.actionId
         );
       else if (data.op === "leave") result = rooms.leave(data.roomId, token);
-      else throw new Error("\u672A\u77E5\u8BF7\u6C42\u3002");
+      else if (data.op === "voiceData") {
+        const clip = rooms.voiceRead(data.roomId, token, data.eventId);
+        result = { mime: clip.mime, data: clip.audio.toString("base64") };
+      } else throw new Error("\u672A\u77E5\u8BF7\u6C42\u3002");
       res.setHeader("Content-Type", "application/json; charset=utf-8");
       res.end(JSON.stringify(result));
     } catch (error) {
