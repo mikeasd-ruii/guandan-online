@@ -588,6 +588,8 @@ var RoomService = class {
       },
       seenActions: /* @__PURE__ */ new Set(),
       humanMatch: false,
+      countdownUntil: null,
+      lastChampion: null,
       events: [],
       voices: /* @__PURE__ */ new Map(),
       voiceBytes: 0,
@@ -638,6 +640,8 @@ var RoomService = class {
   snapshot(room, seat) {
     this.pruneSocial(room);
     const now = this.clock();
+    if (room.countdownUntil && room.countdownUntil <= now)
+      room.countdownUntil = null;
     const online = room.members.map((m) => !!m && now - m.seen < 2e4);
     if (!online[room.owner]) {
       const next = online.findIndex(Boolean);
@@ -662,6 +666,8 @@ var RoomService = class {
       match: room.match ? publicMatch(room.match, seat) : null,
       options: room.options,
       humanMatch: room.humanMatch,
+      countdownUntil: room.countdownUntil,
+      lastChampion: room.lastChampion ? { ...room.lastChampion } : null,
       events: room.events.map((event) => ({ ...event }))
     };
   }
@@ -686,6 +692,9 @@ var RoomService = class {
       owner();
       if (room.match) throw new Error("\u8FD9\u573A\u724C\u5DF2\u7ECF\u5F00\u59CB\u4E86\u3002");
       room.match = newMatch(randomInt(0, 4294967295), room.options);
+      room.humanMatch = room.members.filter(Boolean).length >= 2;
+      room.lastChampion = null;
+      room.countdownUntil = this.clock() + 3e3;
     } else if (command.type === "next") {
       owner();
       if (!room.match) throw new Error("\u8FD8\u6CA1\u6709\u5F00\u59CB\u3002");
@@ -694,6 +703,8 @@ var RoomService = class {
       owner();
       room.match = newMatch(randomInt(0, 4294967295), room.options);
       room.humanMatch = room.members.filter(Boolean).length >= 2;
+      room.lastChampion = null;
+      room.countdownUntil = this.clock() + 3e3;
     } else if (command.type === "options") {
       owner();
       if (room.match) throw new Error("\u5F00\u5C40\u540E\u4E0D\u80FD\u4FEE\u6539\u623F\u95F4\u89C4\u5219\u3002");
@@ -735,10 +746,13 @@ var RoomService = class {
       if (!room.match) throw new Error("\u8BF7\u5148\u5F00\u59CB\u5BF9\u5C40\u3002");
       if (!["play", "tribute", "return"].includes(command.type))
         throw new Error("\u672A\u77E5\u64CD\u4F5C\u3002");
+      if (room.countdownUntil && this.clock() < room.countdownUntil)
+        throw new Error("\u5F00\u5C40\u5012\u8BA1\u65F6\u8FD8\u6CA1\u7ED3\u675F\u3002");
       room.match = matchAction(room.match, seat, command);
+      this.finishCompletedMatch(room);
     }
     room.revision++;
-    room.nextMoveAt = this.clock() + 950;
+    room.nextMoveAt = room.match ? (room.countdownUntil ?? this.clock()) + 950 : 0;
     room.seenActions.add(dedup);
     if (room.seenActions.size > 1500)
       room.seenActions.delete(room.seenActions.values().next().value);
@@ -827,12 +841,29 @@ var RoomService = class {
     if (room.members.every((m) => !m)) this.rooms.delete(room.id);
     return { left: true };
   }
+  finishCompletedMatch(room) {
+    if (room.match?.phase !== "complete" || room.match.champion === null)
+      return false;
+    room.lastChampion = {
+      team: room.match.champion === 0 ? 0 : 1,
+      notice: room.match.notice,
+      completedAt: this.clock()
+    };
+    room.match = null;
+    room.countdownUntil = null;
+    room.nextMoveAt = 0;
+    return true;
+  }
   tick() {
     const now = this.clock();
     for (const room of this.rooms.values()) {
       this.pruneSocial(room);
       if (now - room.active > 15 * 60 * 1e3) {
         this.rooms.delete(room.id);
+        continue;
+      }
+      if (this.finishCompletedMatch(room)) {
+        room.revision++;
         continue;
       }
       const match = room.match;
@@ -855,8 +886,9 @@ var RoomService = class {
           cardId: cards.at(-1).id
         });
       }
+      this.finishCompletedMatch(room);
       room.revision++;
-      room.nextMoveAt = now + 950;
+      room.nextMoveAt = room.match ? now + 950 : 0;
     }
   }
 };
